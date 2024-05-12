@@ -16,6 +16,7 @@ try:
     os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['SLURM_LOCALID']
 except Exception:
     pass
+import torch.nn as nn
 
 import copy
 import time
@@ -46,6 +47,32 @@ from app.vjepa.utils import (
     init_opt,
 )
 from app.vjepa.transforms import make_transforms
+
+
+
+
+
+class Decoder(nn.Module):
+  def __init__(self):
+    super(Decoder, self).__init__()
+    # Fully connected layer to adjust dimensions
+    self.av = nn.AdaptiveAvgPool2d(1024)
+    self.conv1d  = nn.Conv1d(1024, 1, kernel_size=1, stride=1)  
+    self.fc = nn.Linear(1024, 224*224*3)
+
+  def forward(self, x):
+    # Reshape input to fit fully connected layer
+    x = self.av(x)
+    x = self.conv1d(x)
+    x = x.view(x.size(0), -1)
+    x = self.fc(x)
+    # Reshape back to image dimensions
+    x = x.view(-1, 3,224, 224)
+    x = torch.sigmoid(x) # Sigmoid activation to ensure output range [0, 1]
+    return x
+
+
+
 
 
 # --
@@ -275,7 +302,8 @@ def main(args, resume_preempt=False):
     if ipe is None:
         ipe = _dlen
     logger.info(f'iterations per epoch/dataest length: {ipe}/{_dlen}')
-
+    decoder = Decoder()
+    decoder = decoder.to(device)
     # -- init optimizer and scheduler
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
         encoder=encoder,
@@ -436,7 +464,8 @@ def main(args, resume_preempt=False):
                     z = encoder(c, masks_enc)
                     z = predictor(z, h, masks_enc, masks_pred)
                     return z
-
+                def decode(z):
+                  return decoder(z)
                 def loss_fn(z, h):
                     loss = 0.
                     # Compute loss and accumulate for each mask-enc/mask-pred pair
@@ -451,8 +480,14 @@ def main(args, resume_preempt=False):
                 # Step 1. Forward
                 loss_jepa, loss_reg = 0., 0.
                 with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):
+                    print("CLIPS:",clips.shape)
                     h = forward_target(clips)
+                    print("H:",len(h),h[0].shape,h[1].shape)
                     z = forward_context(clips, h)
+                    print("Z:",len(z),z[0].shape,z[1].shape)
+
+                    img = decode(torch.cat(z,1))
+                    print("OUT IMAGE:",img.shape)
                     loss_jepa = loss_fn(z, h)  # jepa prediction loss
                     pstd_z = reg_fn(z)  # predictor variance across patches
                     loss_reg += torch.mean(F.relu(1.-pstd_z))
